@@ -22,7 +22,8 @@ class PlanTripView(APIView):
         planner = HOSPlanner(
             distance_mi=route['distance_mi'],
             duration_hr=route['duration_hr'],
-            current_cycle_used_hours=data['current_cycle_used_hours']
+            current_cycle_used_hours=data['current_cycle_used_hours'],
+            pre_pickup_drive_min=route.get('pre_pickup_min', 0)  # <-- key wire-up
         )
         plan = planner.plan()
 

@@ -29,7 +29,6 @@ class DayPlan:
     segments: List[Segment]
 
     def to_api(self, index: int):
-        # Compute notes
         drive_minutes = sum(int((s.end - s.start).total_seconds()//60) for s in self.segments if s.status == DRIVING)
         window_minutes = sum(int((s.end - s.start).total_seconds()//60) for s in self.segments if s.status in {DRIVING, ON_DUTY, OFF, SLEEPER})
         return {
@@ -53,21 +52,17 @@ class Stop:
         }
 
 class HOSPlanner:
-    """Very simple HOS planner implementing the essentials:
-    - 14-hour on-duty window per day
-    - 11 hours max driving per day
-    - 30-min break after 8h of *driving* (any >=30min non-driving breaks count)
-    - 70-hour / 8-day cycle limit with an optional automatic 34-hour reset
-    - 1h Pickup + 1h Drop (on-duty)
-    - Fuel stop: every 1000 miles (30 min on-duty)
-    """
+    """Simplified HOS planner (14h window, 11h driving/day, 30m break after 8h driving,
+    70h/8d cycle with 34h restart, 1h Pickup + 1h Drop, Fuel every 1000mi (30m))."""
 
-    def __init__(self, *, distance_mi: float, duration_hr: float, current_cycle_used_hours: float, start_dt: Optional[datetime] = None):
+    def __init__(self, *, distance_mi: float, duration_hr: float, current_cycle_used_hours: float,
+                 start_dt: Optional[datetime] = None, pre_pickup_drive_min: int = 0):
         self.distance_mi = float(distance_mi)
         self.duration_min = int(round(duration_hr * 60))
         self.cycle_used_min = int(round(current_cycle_used_hours * 60))
         self.start_dt = start_dt or datetime.utcnow().replace(hour=8, minute=0, second=0, microsecond=0)
         self.avg_mph = (self.distance_mi / (self.duration_min/60.0)) if self.duration_min else 50.0
+        self.pre_pickup_drive_min = max(0, int(pre_pickup_drive_min))
 
         # HOS constants (minutes)
         self.DAY_WINDOW_MIN = 14 * 60
@@ -86,59 +81,69 @@ class HOSPlanner:
         segments: List[Segment] = []
         stops: List[Stop] = []
 
-        # Helper to append a segment
         def add_segment(start: datetime, minutes: int, status: str, label: str = '') -> Segment:
             seg = Segment(start=start, end=start + timedelta(minutes=minutes), status=status, label=label)
             segments.append(seg)
-            # Add stop record for special labels
-            if label in { 'Pickup', 'Drop', 'Fuel', '30m Break' }:
+            # Count toward 70h cycle if on-duty or driving
+            if status in {DRIVING, ON_DUTY}:
+                self.cycle_used_min += minutes
+            if label in {'Pickup', 'Drop', 'Fuel', '30m Break'}:
                 stops.append(Stop(type=label.lower() if label != '30m Break' else 'break', eta=seg.start, duration_min=minutes))
             return seg
 
-        # Time trackers
         cursor = self.start_dt
-        driving_left_min = self.duration_min
-        driven_min = 0
+        driving_left_min = self.duration_min     # total driving minutes for entire route
+        driven_min = 0                           # how many minutes of driving we have logged
         drive_since_break_min = 0
-        next_fuel_thresholds = [i * self.fuel_every_miles for i in range(1, int(self.distance_mi // self.fuel_every_miles) + 1)]
-        # convert fuel thresholds into driving-min thresholds to trigger fuel stops
-        fuel_drive_threshold_mins = [int(round((miles / self.distance_mi) * self.duration_min)) for miles in next_fuel_thresholds]
+
+        # Fuel thresholds based on trip proportion (convert miles→minutes via total duration proportion)
+        next_fuel_thresholds_miles = [i * self.fuel_every_miles for i in range(1, int(self.distance_mi // self.fuel_every_miles) + 1)]
+        fuel_drive_threshold_mins = [int(round((miles / self.distance_mi) * self.duration_min)) for miles in next_fuel_thresholds_miles]
 
         # Day trackers
-        day_start = cursor
         day_window_used = 0
         day_drive_used = 0
-        day_index = 1
+        pickup_done = (self.pre_pickup_drive_min == 0)
+
+        # If already at pickup, do the pickup now
+        if pickup_done:
+            add_segment(cursor, 60, ON_DUTY, 'Pickup')
+            cursor += timedelta(minutes=60)
+            day_window_used += 60
 
         def start_new_day(current: datetime):
             return current.replace(hour=8, minute=0, second=0, microsecond=0)
 
         def end_day_and_reset():
-            nonlocal cursor, day_start, day_window_used, day_drive_used, drive_since_break_min
+            nonlocal cursor, day_window_used, day_drive_used, drive_since_break_min
             add_segment(cursor, self.OFF_DUTY_RESET_MIN, OFF, 'Off Duty (reset)')
             cursor += timedelta(minutes=self.OFF_DUTY_RESET_MIN)
             drive_since_break_min = 0
-            # new day at 08:00 local time equivalent (stick with UTC in this demo)
             cursor = start_new_day(cursor)
-
-        # Pickup (1h on-duty)
-        add_segment(cursor, 60, ON_DUTY, 'Pickup')
-        cursor += timedelta(minutes=60)
-        day_window_used += 60
-        self.cycle_used_min += 60
+            day_window_used = 0
+            day_drive_used = 0
 
         while driving_left_min > 0:
+            # Insert pickup exactly when reaching the boundary of the first leg
+            if (not pickup_done) and driven_min >= self.pre_pickup_drive_min:
+                add_segment(cursor, 60, ON_DUTY, 'Pickup')
+                cursor += timedelta(minutes=60)
+                day_window_used += 60
+                pickup_done = True
+                continue
+
+            # 70h/8d cycle
             if self.cycle_used_min >= self.CYCLE_MAX_MIN:
                 add_segment(cursor, self.CYCLE_RESET_MIN, OFF, '34h Restart')
                 cursor += timedelta(minutes=self.CYCLE_RESET_MIN)
                 self.cycle_used_min = 0
                 drive_since_break_min = 0
-                day_start = start_new_day(cursor)
-                cursor = day_start
+                cursor = start_new_day(cursor)
                 day_window_used = 0
                 day_drive_used = 0
+                continue
 
-            # Need a 30m break?
+            # 30-min break after 8h driving
             if drive_since_break_min >= self.BREAK_AFTER_DRIVE_MIN:
                 add_segment(cursor, self.BREAK_BLOCK_MIN, OFF, '30m Break')
                 cursor += timedelta(minutes=self.BREAK_BLOCK_MIN)
@@ -146,12 +151,9 @@ class HOSPlanner:
                 drive_since_break_min = 0
                 continue
 
-            # Day window/drive caps — start a new day if needed
+            # Day limits
             if day_window_used >= self.DAY_WINDOW_MIN or day_drive_used >= self.DAY_DRIVE_MAX_MIN:
                 end_day_and_reset()
-                day_start = cursor
-                day_window_used = 0
-                day_drive_used = 0
                 continue
 
             drive_room_today = min(self.DAY_DRIVE_MAX_MIN - day_drive_used, self.DAY_WINDOW_MIN - day_window_used)
@@ -160,17 +162,20 @@ class HOSPlanner:
             chunk = max(15, int(chunk))
             chunk = min(chunk, driving_left_min)
 
-            # Check if we should insert a fuel stop within this chunk
-            # If the next threshold is within (driven_min, driven_min+chunk], split and insert fuel
+            # Split for fuel or pickup boundary inside this chunk
             next_threshold = None
             for t in fuel_drive_threshold_mins:
                 if driven_min < t <= driven_min + chunk:
                     next_threshold = t
                     break
 
-            if next_threshold is not None:
-                # Drive until threshold
-                drive_first = next_threshold - driven_min
+            pickup_threshold = None
+            if not pickup_done and driven_min < self.pre_pickup_drive_min <= driven_min + chunk:
+                pickup_threshold = self.pre_pickup_drive_min
+
+            split_at = min([x for x in [next_threshold, pickup_threshold] if x is not None], default=None)
+            if split_at is not None:
+                drive_first = split_at - driven_min
                 add_segment(cursor, drive_first, DRIVING)
                 cursor += timedelta(minutes=drive_first)
                 day_window_used += drive_first
@@ -178,10 +183,15 @@ class HOSPlanner:
                 drive_since_break_min += drive_first
                 driving_left_min -= drive_first
                 driven_min += drive_first
-                add_segment(cursor, self.fuel_block_min, ON_DUTY, 'Fuel')
-                cursor += timedelta(minutes=self.fuel_block_min)
-                day_window_used += self.fuel_block_min
-                self.cycle_used_min += self.fuel_block_min
+                if pickup_threshold is not None and split_at == pickup_threshold:
+                    add_segment(cursor, 60, ON_DUTY, 'Pickup')
+                    cursor += timedelta(minutes=60)
+                    day_window_used += 60
+                    pickup_done = True
+                else:
+                    add_segment(cursor, self.fuel_block_min, ON_DUTY, 'Fuel')
+                    cursor += timedelta(minutes=self.fuel_block_min)
+                    day_window_used += self.fuel_block_min
                 continue
 
             # Normal driving chunk
@@ -193,10 +203,10 @@ class HOSPlanner:
             driving_left_min -= chunk
             driven_min += chunk
 
+        # Drop at the end
         add_segment(cursor, 60, ON_DUTY, 'Drop')
         cursor += timedelta(minutes=60)
         day_window_used += 60
-        self.cycle_used_min += 60
 
         # Group into days for API
         days: List[DayPlan] = []
@@ -207,7 +217,6 @@ class HOSPlanner:
         for i, d in enumerate(sorted(day_map.keys()), start=1):
             days.append(DayPlan(date=d, segments=day_map[d]))
 
-        # Build stop list (ensure chronological)
         stops_sorted = sorted(stops, key=lambda s: s.eta)
 
         return {
