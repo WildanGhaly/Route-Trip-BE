@@ -2,6 +2,11 @@ import os
 from pathlib import Path
 from dotenv import load_dotenv
 
+STATIC_URL = "/static/"
+STATIC_ROOT = Path("/var/www/route-trip-be/staticfiles")
+MEDIA_URL = "/media/"
+MEDIA_ROOT = Path("/var/www/route-trip-be/media")
+
 load_dotenv()
 
 BASE_DIR = Path(__file__).resolve().parent.parent
