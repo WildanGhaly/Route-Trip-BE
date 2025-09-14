@@ -1,0 +1,87 @@
+# Python bytecode / C extensions
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+
+# Type checking / linters
+.mypy_cache/
+.ruff_cache/
+.dmypy.json
+dmypy.json
+.pyre/
+
+# Django
+*.log
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+# collected static files (safe to ignore); keep app-level static/ tracked
+/staticfiles/
+/media/
+
+# Env & virtualenvs (keep example)
+.env
+.env.*
+!.env.example
+.venv/
+venv/
+ENV/
+env/
+env.bak/
+venv.bak/
+
+# Proc/runtime
+celerybeat-schedule
+celerybeat.pid
+gunicorn-error.log
+gunicorn-access.log
+*.pid
+
+# IDE/OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.iml
+
+# Backups
+*.sqlite3
